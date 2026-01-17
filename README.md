@@ -40,6 +40,9 @@ I used the public dataset originally released on Kaggle designed as a teaching r
 
 (4) Regularization Performance: Lasso eliminated only one variable (Allergies), suggesting most health indicators in the dataset provide unique predictive value.
 
+(5) The final insurance model we identified is as follow:
+![Insurance Model](insurance_model.jpg)
+
 
 ## Discussion
 (1) Interpretability vs. Accuracy: While PCR utilized all 11 components, it offered zero interpretability. Best Subset Selection provided a "Sparse Model" that is much more actionable for an insurance provider.
