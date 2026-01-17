@@ -1,0 +1,346 @@
+---
+title: "3740 Final Project"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-12-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r date cleaning}
+#install.packages("leaps")
+#install.packages("boot")
+#install.packages("pls")
+#install.packages("glmnet")
+library(pls)
+library(glmnet)
+library(boot)
+library(leaps)
+
+data =read.csv("Medicalpremium.csv")
+names(data)
+# remove rows with any NA
+data = na.omit(data)
+#table(data$NumberOfMajorSurgeries)
+cat_cols= c(
+  "Diabetes",
+  "BloodPressureProblems",
+  "AnyTransplants",
+  "AnyChronicDiseases",
+  "KnownAllergies",
+  "HistoryOfCancerInFamily"
+)
+
+# remove rows with weird values (not 0 or 1)
+for (col in cat_cols) {
+  data =data[data[[col]] %in% c(0, 1), ]
+}
+
+# collapse surgery: 0 to 0, 1 to 1, (2 and 3) to 2 because too few 3
+data$NumberOfMajorSurgeries[data$NumberOfMajorSurgeries >= 2] = 2
+data$NumberOfMajorSurgeries=factor(data$NumberOfMajorSurgeries)
+
+# categorical variables to factors 
+data$Diabetes =factor(data$Diabetes)
+data$BloodPressureProblems =factor(data$BloodPressureProblems)
+data$AnyTransplants = factor(data$AnyTransplants)
+data$AnyChronicDiseases =factor(data$AnyChronicDiseases)
+data$KnownAllergies =factor(data$KnownAllergies)
+data$HistoryOfCancerInFamily =factor(data$HistoryOfCancerInFamily)
+data$NumberOfMajorSurgeries=factor(data$NumberOfMajorSurgeries)
+
+#dim(data)
+#str(data)
+#summary(data)
+#levels(data$NumberOfMajorSurgeries)
+#table(data$NumberOfMajorSurgeries)
+#table(data$Diabetes)
+#table(data$BloodPressureProblems)
+#table(data$AnyTransplants)
+#table(data$AnyChronicDiseases)
+#table(data$KnownAllergies)
+#table(data$HistoryOfCancerInFamily)
+#colSums(is.na(data))
+```
+
+```{r PCR}
+
+set.seed(3740)
+#PCR
+pcr.cv =pcr(PremiumPrice ~ .,
+              data = data,
+              scale = TRUE,
+              validation = "CV")   # 10-fold CV by default
+
+summary(pcr.cv)
+validationplot(pcr.cv, val.type = "MSEP", ylab = "CV.test.MSE")
+
+pcr.final= pcr(PremiumPrice ~ .,
+                 data = data,
+                 scale = TRUE,
+                 ncomp = 11)
+
+# Final model summary
+summary(pcr.final)
+CV_pcr = pcr.cv$validation$PRESS
+mse.pcr_values=CV_pcr/nrow(data)
+mse.pcr_values
+min_mse.pcr = min(mse.pcr_values)
+cat("pcr selected model's test MSE from 10 fold CV:",min_mse.pcr)
+```
+
+
+```{r Ridge_data }
+set.seed(3740)
+# Standardize quantitative x (age, height, weight) to ensure equal shrinkage
+data$Age    =scale(data$Age)
+data$Height =scale(data$Height)
+data$Weight =scale(data$Weight)
+
+# Define response variable
+y =data$PremiumPrice
+
+# Define matrix of predictor variables
+x = model.matrix(PremiumPrice ~ ., data = data)[, -1]
+# -11 means removing PremiumPrice (y) from the dataset
+### Fit the Ridge Regression Model
+
+### Choose an Optimal Value for Lambda with Cross Validation K=10
+
+# Perform k-fold cross validation to find optimal lambda
+# The function cv_model automatically perform k=10 to find optimal lambda
+
+# k-fold splitting is random, putting seed to ensure reproducibility
+cv_model =cv.glmnet(x, y, alpha=0)
+
+# Find optimal lambda value that minimizes test MSE
+best_lambda =cv_model$lambda.min
+best_lambda
+
+# Note: the best lambda selected through CV is 435.614763
+
+### Analyze the Final Model
+
+# Find coefficients of best model
+best_model =glmnet(x, y, alpha=0, lambda=best_lambda)
+coef(best_model)
+### Compute the Test MSE of the best lambda value using k=10
+test.mse =cv_model$cvm[cv_model$lambda == best_lambda]
+# Because cv.glmnet will also compute test MSE of the model for each best_lambda
+# We can directly retrieve
+
+test.mse
+
+# Now we plot the test MSE by log(lambda) values
+plot(cv_model)
+```
+
+```{r lasso}
+#remove the first column because glmnet adds its own intercept.
+x=model.matrix(PremiumPrice~., data=data)[, -1]
+y=data$PremiumPrice
+
+#CV 10 fold
+set.seed(3740)
+#alpha=1 is Lasso
+cv_lasso=cv.glmnet(x,y,alpha=1)
+
+# Plot the MSE against Lambda
+plot(cv_lasso)
+title("Lasso Cross-Validation MSE", line=2.5)
+
+#Best Lambda
+best_lambda2=cv_lasso$lambda.min
+cat("optimal lambda from CV is:",best_lambda2,"\n")
+
+#Min MSE 
+index_min=which(cv_lasso$lambda==best_lambda2)
+min_mse=cv_lasso$cvm[index_min]
+cat("lowest CV MSE is:",min_mse,"\n")
+
+#Coefficients
+#refit model using the best lambda to see variable selection
+final_model=glmnet(x, y,alpha=1, lambda=best_lambda2)
+coef_list=coef(final_model)
+print(coef_list)
+cat("\nVariable Selection Results\n")
+matrix_coef =as.matrix(coef_list)
+#filter for non-zero rows
+selected_vars =matrix_coef[matrix_coef[,1]!=0,]
+cat("Variables selected:\n")
+print(names(selected_vars))
+cat("\nVariables eliminated: KnownAllergies1\n")
+
+```
+
+```{r Best Subset Selection}
+
+set.seed(3740)
+X =model.matrix(PremiumPrice ~ ., data = data)
+data_mm =as.data.frame(X[, -1])
+data_mm$PremiumPrice =data$PremiumPrice
+#The regsubsets() function (part of the leaps library) performs 
+#best subset selection by identifying the best model that contains 
+#a given number of predictors with lowest RSS
+
+best.subset.full =regsubsets (PremiumPrice ~ ., data_mm, nvmax=11) 
+
+best.subset.full.summary =summary(best.subset.full)
+best.subset.full.summary
+
+# 4 candidate models selected using BIC, Cp, adjusted R2, and
+#AIC criteria, respectively. 
+best.size.bic =which.min(best.subset.full.summary$bic)
+best.size.cp  =which.min(best.subset.full.summary$cp)
+best.size.adjr2 =which.max(best.subset.full.summary$adjr2)
+
+#compute AIC manually : AIC = n*log(RSS/n) + 2*k
+#where k = number of parameters = (number of predictors + 1 for intercept)
+p =1:11                      # model sizes (number of predictors)
+k =p + 1                     # parameters including intercept
+rss =best.subset.full.summary$rss     # RSS for best model of each size
+n =nrow(data_mm)                #number of observations
+aic =n * log(rss / n) + 2 * k
+
+best.size.aic =which.min(aic)
+
+#I write a Helper to extract model formula for a given size
+#use coef(best.subset.full, model size)to extract the model with one of the four 
+
+get_model_formula =function(best.subset.full, size) {
+  coefs =coef(best.subset.full, id = size)
+  vars  =names(coefs)[names(coefs) != "(Intercept)"]
+  if (length(vars) == 0) {
+    as.formula("PremiumPrice ~ 1")
+  } else {
+    as.formula(paste("PremiumPrice ~", paste(vars, collapse = " + ")))
+  }
+}
+
+form.bic    =get_model_formula(best.subset.full, best.size.bic)
+form.cp     =get_model_formula(best.subset.full, best.size.cp)
+form.adjr2  =get_model_formula(best.subset.full, best.size.adjr2)
+form.aic    =get_model_formula(best.subset.full, best.size.aic)
+
+form.bic
+form.cp
+form.adjr2
+form.aic
+
+#10-fold cross-validation for each model
+# I defined cost function for cv.glm: MSE (mean squared error)
+# This is the standard measure of prediction accuracy for linear regression
+# We use liner regression for our data
+mse_cost =function(r, pi = 0) {
+  mean((r - pi)^2)
+}
+
+# BIC-selected model
+fit.bic =glm(form.bic, data = data_mm, family = gaussian())
+cv.bic  =cv.glm(data_mm, fit.bic, cost = mse_cost, K = 10)
+
+# Cp-selected model
+fit.cp =glm(form.cp, data = data_mm, family = gaussian())
+cv.cp  =cv.glm(data_mm, fit.cp, cost = mse_cost, K = 10)
+
+# Adjusted R^2-selected model
+fit.adjr2 =glm(form.adjr2, data = data_mm, family = gaussian())
+cv.adjr2  =cv.glm(data_mm, fit.adjr2, cost = mse_cost, K = 10)
+
+# AIC-selected model
+fit.aic =glm(form.aic, data = data_mm, family = gaussian())
+cv.aic  =cv.glm(data_mm, fit.aic, cost = mse_cost, K = 10)
+
+
+cv.results =data.frame(
+  criterion = c("BIC", "Cp", "AdjR2", "AIC"),
+  size      = c(best.size.bic, best.size.cp, best.size.adjr2, best.size.aic),
+  cv_mse    = c(cv.bic$delta[1],
+                cv.cp$delta[1],
+                cv.adjr2$delta[1],
+                cv.aic$delta[1])
+)
+
+print(cv.results)
+
+# Which model has the smallest estimated prediction error?
+best.by.cv =cv.results[which.min(cv.results$cv_mse), ]
+print(best.by.cv)
+
+
+best.by.cv
+final.fit =fit.aic
+summary(final.fit)
+
+cat("10-fold CV MSE for each selected model:\n")
+cat("BIC selected model: ", cv.bic$delta[1], "\n")
+cat("Cp selected model: ", cv.cp$delta[1], "\n")
+cat("Adj R²selected model: ", cv.adjr2$delta[1], "\n")
+cat("AICselected model: ", cv.aic$delta[1], "\n")
+cat("Model with lowest 10-fold CV MSE:", best.by.cv$criterion,
+    "with CV MSE =", best.by.cv$cv_mse, "\n")
+```
+
+
+```{r summary}
+#PCR
+min_mse.pcr_vec =as.vector(min_mse.pcr)
+predictors_pcr=rownames(min_mse.pcr)[min_mse.pcr_vec != 0]
+predictors_pcr=predictors_pcr[predictors_pcr != "(Intercept)"]
+
+cat("\n[1] PCR (Principal Components Regression)\n")
+cat("Best number of components:", which.min(mse.pcr_values), "\n")
+cat("10-fold CV MSE:", min(mse.pcr_values), "\n")
+cat("predictors included:\n")
+print(predictors_pcr)
+
+#ridge
+ridge_coef = coef(best_model)
+ridge_names = rownames(ridge_coef)
+predictors_ridge = ridge_names[ridge_names != "(Intercept)"]
+
+cat("\n[2] Ridge Regression\n")
+cat("Best lambda:", best_lambda, "\n")
+cat("10-fold CV MSE:", test.mse, "\n")
+cat("predictors included in Ridge Regression:\n")
+print(predictors_ridge)
+
+
+#lasso
+lasso_coef_mat = as.matrix(coef_list)
+predictors_lasso = rownames(lasso_coef_mat)[lasso_coef_mat[,1] != 0]
+predictors_lasso = predictors_lasso[predictors_lasso != "(Intercept)"]
+
+cat("\n[4] LASSO Regression\n")
+cat("Best lambda:", best_lambda2, "\n")
+cat("10-fold CV MSE:", min_mse, "\n")
+cat("predictors included:\n")
+print(predictors_lasso)
+
+summary_table = data.frame(
+  Methods = c("PCR", "Ridge", "Subset (AIC)", "LASSO"),
+  Best_Model = c(
+    paste(which.min(mse.pcr_values), "components"),
+    paste("lambda =", round(best_lambda, 4)),
+    paste(best.size.aic, "predictors"),
+    paste("lambda =", round(best_lambda2, 4)) 
+  ),
+  CV_MSE = c(min(mse.pcr_values), test.mse, cv.aic$delta[1], min_mse),
+  Num_Predictors = c(
+    "NA",
+    length(predictors_ridge),
+    best.size.aic,
+    length(predictors_lasso)
+  )
+)
+
+cat("\nSummary Table \n")
+print(summary_table)
+
+cat("\nBest overall model is Subset (AIC) with CV MSE =", cv.aic$delta[1], "\n")
+```
